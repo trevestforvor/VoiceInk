@@ -305,6 +305,9 @@ class StreamingTranscriptionService {
     private func createProvider(
         for model: any TranscriptionModel, vocabulary: RecordingVocabulary
     ) -> StreamingTranscriptionProvider {
+        if let customModel = model as? CustomCloudModel, customModel.phononStreamingURL != nil {
+            return PhononStreamingProvider()
+        }
         if model.provider == .fluidAudio {
             if FluidAudioModelManager.isNemotronModel(named: model.name) {
                 return FluidAudioNemotronStreamingProvider()

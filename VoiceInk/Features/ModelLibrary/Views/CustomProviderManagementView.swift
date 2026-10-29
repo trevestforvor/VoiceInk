@@ -181,6 +181,7 @@ struct CustomTranscriptionModelEditorPanel: View {
     @State private var apiKey = ""
     @State private var modelName = ""
     @State private var isMultilingual = true
+    @State private var usePhononStreaming = false
     @State private var validationErrors: [String] = []
     @State private var isSaving = false
     @State private var connectionTest: ConnectionTestState = .idle
@@ -240,6 +241,13 @@ struct CustomTranscriptionModelEditorPanel: View {
                             CustomModelTextField(
                                 label: "Model Name", placeholder: "gpt-4o-mini-transcribe", text: $modelName)
                             CustomModelToggleRow(title: "Multilingual Model", isOn: $isMultilingual)
+                            if PhononStreamingEndpoint.url(for: apiEndpoint) != nil {
+                                CustomModelToggleRow(title: "Live Preview (Phonon)", isOn: $usePhononStreaming)
+                                Text("Show text while speaking with a local Phonon server. The complete recording is still used for the final transcript.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                             ConnectionTestRow(
                                 state: connectionTest, isDisabled: !canTestConnection, action: runConnectionTest)
                         }
@@ -290,12 +298,14 @@ struct CustomTranscriptionModelEditorPanel: View {
             apiKey = APIKeyManager.shared.getCustomModelAPIKey(forModelId: editingModel.id) ?? ""
             modelName = editingModel.modelName
             isMultilingual = editingModel.isMultilingualModel
+            usePhononStreaming = editingModel.usePhononStreaming
         } else {
             displayName = ""
             apiEndpoint = "https://api.openai.com/v1/audio/transcriptions"
             apiKey = ""
             modelName = "gpt-4o-mini-transcribe"
             isMultilingual = true
+            usePhononStreaming = false
         }
 
         validationErrors = []
@@ -333,7 +343,8 @@ struct CustomTranscriptionModelEditorPanel: View {
                 description: "Custom transcription model",
                 apiEndpoint: trimmedEndpoint,
                 modelName: trimmedModelName,
-                isMultilingual: isMultilingual
+                isMultilingual: isMultilingual,
+                usePhononStreaming: usePhononStreaming && PhononStreamingEndpoint.url(for: trimmedEndpoint) != nil
             )
 
             guard customModelManager.updateCustomModel(updatedModel, apiKey: trimmedKey) else {
@@ -348,7 +359,8 @@ struct CustomTranscriptionModelEditorPanel: View {
                 description: "Custom transcription model",
                 apiEndpoint: trimmedEndpoint,
                 modelName: trimmedModelName,
-                isMultilingual: isMultilingual
+                isMultilingual: isMultilingual,
+                usePhononStreaming: usePhononStreaming && PhononStreamingEndpoint.url(for: trimmedEndpoint) != nil
             )
 
             guard customModelManager.addCustomModel(customModel, apiKey: trimmedKey) else {
