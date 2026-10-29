@@ -1,6 +1,7 @@
 import Foundation
 
 /// Serializes socket state while audio arrives from the recording queue.
+/// Wire format: PCM binary frames and partial/final/done JSON events, as used by Phonon.
 actor PhononStreamingConnection {
     private let events: AsyncStream<StreamingTranscriptionEvent>.Continuation
     private var session: URLSession?
@@ -94,7 +95,7 @@ actor PhononStreamingConnection {
                 switch message.type {
                 case "partial", "final", "done":
                     guard let text = message.text else {
-                        throw StreamingTranscriptionError.serverError("Phonon returned a transcript without text.")
+                        throw StreamingTranscriptionError.serverError("The streaming server returned a transcript without text.")
                     }
                     if message.type == "final" {
                         if !text.isEmpty { committedSegments.append(text) }
@@ -109,7 +110,7 @@ actor PhononStreamingConnection {
                         events.finish()
                     }
                 case "error":
-                    throw StreamingTranscriptionError.serverError(message.message ?? "Phonon streaming failed.")
+                    throw StreamingTranscriptionError.serverError(message.message ?? "WebSocket streaming failed.")
                 default:
                     break
                 }

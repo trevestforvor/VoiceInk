@@ -181,7 +181,7 @@ struct CustomTranscriptionModelEditorPanel: View {
     @State private var apiKey = ""
     @State private var modelName = ""
     @State private var isMultilingual = true
-    @State private var usePhononStreaming = false
+    @State private var streamingProtocol: CustomStreamingProtocol = .disabled
     @State private var validationErrors: [String] = []
     @State private var isSaving = false
     @State private var connectionTest: ConnectionTestState = .idle
@@ -241,9 +241,13 @@ struct CustomTranscriptionModelEditorPanel: View {
                             CustomModelTextField(
                                 label: "Model Name", placeholder: "gpt-4o-mini-transcribe", text: $modelName)
                             CustomModelToggleRow(title: "Multilingual Model", isOn: $isMultilingual)
-                            if PhononStreamingEndpoint.url(for: apiEndpoint) != nil {
-                                CustomModelToggleRow(title: "Live Preview (Phonon)", isOn: $usePhononStreaming)
-                                Text("Show text while speaking with a local Phonon server. The complete recording is still used for the final transcript.")
+                            if CustomStreamingProtocol.available(for: apiEndpoint).count > 1 {
+                                Picker("Live Preview", selection: $streamingProtocol) {
+                                    ForEach(CustomStreamingProtocol.available(for: apiEndpoint)) { option in
+                                        Text(option.displayName).tag(option)
+                                    }
+                                }
+                                Text("Show text while speaking with a compatible server. The complete recording is still used for the final transcript.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -279,7 +283,12 @@ struct CustomTranscriptionModelEditorPanel: View {
         .onChange(of: editingModel?.id) { _, _ in
             loadModel()
         }
-        .onChange(of: apiEndpoint) { _, _ in resetConnectionTest() }
+        .onChange(of: apiEndpoint) { _, _ in
+            resetConnectionTest()
+            if !CustomStreamingProtocol.available(for: apiEndpoint).contains(streamingProtocol) {
+                streamingProtocol = .disabled
+            }
+        }
         .onChange(of: apiKey) { _, _ in resetConnectionTest() }
         .onChange(of: modelName) { _, _ in resetConnectionTest() }
     }
@@ -298,14 +307,14 @@ struct CustomTranscriptionModelEditorPanel: View {
             apiKey = APIKeyManager.shared.getCustomModelAPIKey(forModelId: editingModel.id) ?? ""
             modelName = editingModel.modelName
             isMultilingual = editingModel.isMultilingualModel
-            usePhononStreaming = editingModel.usePhononStreaming
+            streamingProtocol = editingModel.streamingProtocol
         } else {
             displayName = ""
             apiEndpoint = "https://api.openai.com/v1/audio/transcriptions"
             apiKey = ""
             modelName = "gpt-4o-mini-transcribe"
             isMultilingual = true
-            usePhononStreaming = false
+            streamingProtocol = .disabled
         }
 
         validationErrors = []
@@ -344,7 +353,8 @@ struct CustomTranscriptionModelEditorPanel: View {
                 apiEndpoint: trimmedEndpoint,
                 modelName: trimmedModelName,
                 isMultilingual: isMultilingual,
-                usePhononStreaming: usePhononStreaming && PhononStreamingEndpoint.url(for: trimmedEndpoint) != nil
+                streamingProtocol: CustomStreamingProviderRegistry.endpoint(for: trimmedEndpoint, protocol: streamingProtocol) != nil
+                    ? streamingProtocol : .disabled
             )
 
             guard customModelManager.updateCustomModel(updatedModel, apiKey: trimmedKey) else {
@@ -360,7 +370,8 @@ struct CustomTranscriptionModelEditorPanel: View {
                 apiEndpoint: trimmedEndpoint,
                 modelName: trimmedModelName,
                 isMultilingual: isMultilingual,
-                usePhononStreaming: usePhononStreaming && PhononStreamingEndpoint.url(for: trimmedEndpoint) != nil
+                streamingProtocol: CustomStreamingProviderRegistry.endpoint(for: trimmedEndpoint, protocol: streamingProtocol) != nil
+                    ? streamingProtocol : .disabled
             )
 
             guard customModelManager.addCustomModel(customModel, apiKey: trimmedKey) else {

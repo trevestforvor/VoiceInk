@@ -1,4 +1,4 @@
-"""Loopback-only Phonon protocol fixture; no model or microphone required."""
+"""Loopback-only fixture for the Phonon-compatible PCM/JSON protocol; no model or microphone required."""
 import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

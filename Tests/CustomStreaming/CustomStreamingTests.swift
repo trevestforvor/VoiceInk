@@ -2,13 +2,13 @@ import Foundation
 import XCTest
 @testable import VoiceInkStreaming
 
-final class PhononStreamingTests: XCTestCase {
+final class CustomStreamingTests: XCTestCase {
     private func model(path: String = "happy", enabled: Bool = true) -> CustomCloudModel {
-        let port = ProcessInfo.processInfo.environment["PHONON_TEST_PORT"] ?? "0"
+        let port = ProcessInfo.processInfo.environment["CUSTOM_STREAMING_TEST_PORT"] ?? "0"
         return CustomCloudModel(
-            name: "phonon-local", displayName: "Phonon", description: "Test",
+            name: "local-stt", displayName: "Local STT", description: "Test",
             apiEndpoint: "http://127.0.0.1:\(port)/\(path)/v1/audio/transcriptions",
-            modelName: "phonon-2", isMultilingual: false, usePhononStreaming: enabled
+            modelName: "local-stt", isMultilingual: false, streamingProtocol: enabled ? .phonon : .disabled
         )
     }
 
@@ -39,7 +39,7 @@ final class PhononStreamingTests: XCTestCase {
             XCTAssertNil(PhononStreamingEndpoint.url(for: endpoint), endpoint)
             let remote = CustomCloudModel(
                 name: "custom", displayName: "Custom", description: "Test", apiEndpoint: endpoint,
-                modelName: "phonon-2", usePhononStreaming: true
+                modelName: "local-stt", streamingProtocol: .phonon
             )
             XCTAssertFalse(remote.supportsStreaming, endpoint)
         }
@@ -50,12 +50,12 @@ final class PhononStreamingTests: XCTestCase {
         let original = model()
         let encoded = try JSONEncoder().encode(original)
         let restored = try JSONDecoder().decode(CustomCloudModel.self, from: encoded)
-        XCTAssertTrue(restored.usePhononStreaming)
-        XCTAssertEqual(restored.phononStreamingURL, original.phononStreamingURL)
+        XCTAssertEqual(restored.streamingProtocol, .phonon)
+        XCTAssertEqual(restored.streamingURL, original.streamingURL)
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-        legacy.removeValue(forKey: "usePhononStreaming")
+        legacy.removeValue(forKey: "streamingProtocol")
         let decoded = try JSONDecoder().decode(CustomCloudModel.self, from: JSONSerialization.data(withJSONObject: legacy))
-        XCTAssertFalse(decoded.usePhononStreaming)
+        XCTAssertEqual(decoded.streamingProtocol, .disabled)
         XCTAssertFalse(decoded.supportsStreaming)
     }
 
@@ -65,6 +65,40 @@ final class PhononStreamingTests: XCTestCase {
             XCTFail("Preview text must never become the delivered transcript")
         }
         XCTAssertNil(provider.finalizationEvents)
+    }
+
+    func testRegistrySelectsAdapterIndependentlyOfModelName() {
+        let custom = model()
+        XCTAssertEqual(custom.modelName, "local-stt")
+        XCTAssertTrue(CustomStreamingProviderRegistry.makeProvider(for: custom) is PhononStreamingProvider)
+        XCTAssertNil(CustomStreamingProviderRegistry.makeProvider(for: model(enabled: false)))
+        XCTAssertTrue(CustomStreamingProtocol.available(for: custom.apiEndpoint).contains(.phonon))
+        XCTAssertFalse(CustomStreamingProtocol.available(for: "https://example.com/v1/audio/transcriptions").contains(.phonon))
+    }
+
+    func testUnknownProtocolFallsBackToBatchWithoutLosingModel() throws {
+        var stored = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(model())) as? [String: Any])
+        stored["streamingProtocol"] = "future-adapter"
+        let restored = try JSONDecoder().decode(CustomCloudModel.self, from: JSONSerialization.data(withJSONObject: stored))
+        XCTAssertEqual(restored.modelName, "local-stt")
+        XCTAssertEqual(restored.streamingProtocol, .disabled)
+        XCTAssertFalse(restored.supportsStreaming)
+    }
+
+    func testOriginalPreviewSettingMigratesAndNewSettingTakesPrecedence() throws {
+        var stored = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(model())) as? [String: Any])
+        stored.removeValue(forKey: "streamingProtocol")
+        stored["usePhononStreaming"] = true
+        let migrated = try JSONDecoder().decode(CustomCloudModel.self, from: JSONSerialization.data(withJSONObject: stored))
+        XCTAssertEqual(migrated.streamingProtocol, .phonon)
+        XCTAssertTrue(migrated.supportsStreaming)
+        let reencoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(migrated)) as? [String: Any])
+        XCTAssertNil(reencoded["usePhononStreaming"])
+        XCTAssertEqual(reencoded["streamingProtocol"] as? String, "phonon")
+
+        stored["streamingProtocol"] = "disabled"
+        let disabled = try JSONDecoder().decode(CustomCloudModel.self, from: JSONSerialization.data(withJSONObject: stored))
+        XCTAssertFalse(disabled.supportsStreaming)
     }
 
     func testSnapshotsPreserveRepeatedPhrasesAndDone() async throws {
@@ -140,14 +174,14 @@ final class PhononStreamingTests: XCTestCase {
         await collector.value
     }
 
-    func testLivePhononServerWhenRequested() async throws {
+    func testLiveCompatibleServerWhenRequested() async throws {
         let environment = ProcessInfo.processInfo.environment
-        guard let endpoint = environment["PHONON_LIVE_ENDPOINT"],
-            let pcmPath = environment["PHONON_LIVE_PCM"]
-        else { throw XCTSkip("Pass --live-endpoint and --audio to run against a separate Phonon server") }
+        guard let endpoint = environment["CUSTOM_STREAMING_LIVE_ENDPOINT"],
+            let pcmPath = environment["CUSTOM_STREAMING_LIVE_PCM"]
+        else { throw XCTSkip("Pass --live-endpoint and --audio to run against a separate compatible server") }
         let liveModel = CustomCloudModel(
-            name: "phonon-live-test", displayName: "Phonon test", description: "Test",
-            apiEndpoint: endpoint, modelName: "phonon-2", isMultilingual: false, usePhononStreaming: true
+            name: "custom-live-test", displayName: "Custom streaming test", description: "Test",
+            apiEndpoint: endpoint, modelName: "local-stt", isMultilingual: false, streamingProtocol: .phonon
         )
         let provider = PhononStreamingProvider()
         let collector = Task { () -> (Int, Int, String) in
@@ -174,7 +208,7 @@ final class PhononStreamingTests: XCTestCase {
         XCTAssertGreaterThan(result.0, 1)
         XCTAssertEqual(result.1, 0)
         XCTAssertFalse(result.2.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        print("Live Phonon: \(result.0) preview updates, \(result.1) errors, final preview: \(result.2)")
+        print("Live compatible server: \(result.0) preview updates, \(result.1) errors, final preview: \(result.2)")
         await provider.disconnect()
     }
 
@@ -196,7 +230,7 @@ final class PhononStreamingTests: XCTestCase {
                 if service.isActive, !snapshots.isEmpty || path != "happy" { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
-            let recording = URL(fileURLWithPath: "/tmp/voiceink-phonon-complete-recording.wav")
+            let recording = URL(fileURLWithPath: "/tmp/voiceink-custom-complete-recording.wav")
             let text = try await session.transcribe(audioURL: recording, vocabulary: RecordingVocabulary())
             XCTAssertEqual(text, "complete recording result", path)
             XCTAssertEqual(fallback.receivedURLs, [recording], path)

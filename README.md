@@ -61,7 +61,7 @@ As an open-source project, you can build VoiceInk yourself by following the inst
 ## Documentation
 
 - [Building from Source](BUILDING.md) - Detailed instructions for building the project
-- [Local Phonon Live Preview](docs/phonon-live-preview.md) - Optional preview with full-recording final transcription
+- [Custom Streaming Live Preview](docs/custom-streaming.md) - Optional preview with full-recording final transcription
 - [Contributing Guidelines](CONTRIBUTING.md) - How to contribute to VoiceInk
 - [Code of Conduct](CODE_OF_CONDUCT.md) - Our community standards
 

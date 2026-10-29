@@ -171,14 +171,13 @@ struct CustomCloudModel: TranscriptionModel, Codable {
     let modelName: String
     let isMultilingualModel: Bool
     let supportedLanguages: [String: String]
-    let usePhononStreaming: Bool
+    let streamingProtocol: CustomStreamingProtocol
 
-    var phononStreamingURL: URL? {
-        guard usePhononStreaming else { return nil }
-        return PhononStreamingEndpoint.url(for: apiEndpoint)
+    var streamingURL: URL? {
+        CustomStreamingProviderRegistry.endpoint(for: apiEndpoint, protocol: streamingProtocol)
     }
 
-    var supportsStreaming: Bool { phononStreamingURL != nil }
+    var supportsStreaming: Bool { streamingURL != nil }
 
     /// API key retrieved from Keychain by model ID.
     var apiKey: String {
@@ -188,7 +187,7 @@ struct CustomCloudModel: TranscriptionModel, Codable {
     init(
         id: UUID = UUID(), name: String, displayName: String, description: String, apiEndpoint: String,
         modelName: String, isMultilingual: Bool = true, supportedLanguages: [String: String]? = nil,
-        usePhononStreaming: Bool = false
+        streamingProtocol: CustomStreamingProtocol = .disabled
     ) {
         self.id = id
         self.name = name
@@ -198,14 +197,15 @@ struct CustomCloudModel: TranscriptionModel, Codable {
         self.modelName = modelName
         self.isMultilingualModel = isMultilingual
         self.supportedLanguages = supportedLanguages ?? LanguageDictionary.forProvider(isMultilingual: isMultilingual)
-        self.usePhononStreaming = usePhononStreaming
+        self.streamingProtocol = streamingProtocol
     }
 
     /// Custom Codable to migrate legacy apiKey from JSON to Keychain.
     private enum CodingKeys: String, CodingKey {
         case id, name, displayName, description, apiEndpoint, modelName, isMultilingualModel, supportedLanguages
         case apiKey
-        case usePhononStreaming
+        case streamingProtocol
+        case usePhononStreaming // Migrate the original preview setting without changing behavior.
     }
 
     init(from decoder: Decoder) throws {
@@ -218,7 +218,12 @@ struct CustomCloudModel: TranscriptionModel, Codable {
         modelName = try container.decode(String.self, forKey: .modelName)
         isMultilingualModel = try container.decode(Bool.self, forKey: .isMultilingualModel)
         supportedLanguages = try container.decode([String: String].self, forKey: .supportedLanguages)
-        usePhononStreaming = try container.decodeIfPresent(Bool.self, forKey: .usePhononStreaming) ?? false
+        if let selectedProtocol = try container.decodeIfPresent(CustomStreamingProtocol.self, forKey: .streamingProtocol) {
+            streamingProtocol = selectedProtocol
+        } else {
+            streamingProtocol = try container.decodeIfPresent(Bool.self, forKey: .usePhononStreaming) == true
+                ? .phonon : .disabled
+        }
 
         if let legacyApiKey = try container.decodeIfPresent(String.self, forKey: .apiKey), !legacyApiKey.isEmpty {
             APIKeyManager.shared.saveCustomModelAPIKey(legacyApiKey, forModelId: id)
@@ -235,7 +240,7 @@ struct CustomCloudModel: TranscriptionModel, Codable {
         try container.encode(modelName, forKey: .modelName)
         try container.encode(isMultilingualModel, forKey: .isMultilingualModel)
         try container.encode(supportedLanguages, forKey: .supportedLanguages)
-        try container.encode(usePhononStreaming, forKey: .usePhononStreaming)
+        try container.encode(streamingProtocol, forKey: .streamingProtocol)
     }
 }
 

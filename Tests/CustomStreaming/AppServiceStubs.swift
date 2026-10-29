@@ -1,6 +1,6 @@
 import Foundation
 
-// Test doubles for app services unrelated to Phonon. The model, streaming
+// Test doubles for app services unrelated to custom streaming. The model, streaming
 // service, session, provider, socket, and transcription contracts are real sources.
 final class APIKeyManager {
     static let shared = APIKeyManager()
