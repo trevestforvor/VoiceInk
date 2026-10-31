@@ -45,6 +45,27 @@ adapter accepts loopback HTTP(S) transcription endpoints. `localhost`,
 parameters, and fragments are excluded from this first version. The streaming
 URL is derived on the same host and port, preserving an optional proxy path.
 
+## Our local default deployment
+
+The default on our Mac is **Phonon 2.5 English** on port **9877**, using
+`fermion-research==0.2.15`. Its permanent runtime and login service are managed
+by the [parakeet-server deployment installer](https://github.com/trevestforvor/parakeet-server/blob/main/docs/phonon-default.md).
+The service runs from Application Support so deleting a development worktree
+cannot remove the server. Use `python3 scripts/phonon-service.py status` in that
+repository to check it before diagnosing missing preview text.
+
+The existing custom model uses
+`http://127.0.0.1:9877/v1/audio/transcriptions`, served model name `phonon-2`,
+Live Preview **Phonon**, and **Real-time** enabled in the default mode. The old
+model name is a compatibility alias, not the loaded model version. AI
+enhancement remains off. Other users' models remain opt-in.
+
+The streaming build was verified with microphone input, live preview and final
+paste on 2026-10-30. After restoring the missing server runtime on 2026-10-31,
+all 14 integration/regression tests passed against the actual Phonon 2.5 server,
+including 19 live preview updates with no streaming errors. Automatic service
+restart was also verified.
+
 ## Expected behavior
 
 - The recorder's existing live-text UI displays changing transcript snapshots.
