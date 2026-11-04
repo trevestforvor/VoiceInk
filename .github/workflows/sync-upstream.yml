@@ -1,0 +1,109 @@
+# Keeps this fork current with Beingpax/VoiceInk without losing our own commits.
+#
+# Daily (and on demand), upstream main is merged into the `upstream-sync` branch, rebuilt
+# from our main each run, and offered as a single rolling PR. A merge that conflicts with
+# our changes opens an issue listing the files instead, and the run fails so GitHub emails.
+# After merging the PR, run scripts/install-local.sh to rebuild and install on the Mac.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: Beingpax/VoiceInk
+  SYNC_BRANCH: upstream-sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream into the sync branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream main
+
+          behind=$(git rev-list --count HEAD..upstream/main)
+          if [ "$behind" -eq 0 ]; then
+            echo "main already contains upstream/main."
+            exit 0
+          fi
+          tip=$(git rev-parse --short upstream/main)
+          commits=$(git log --no-merges --format='- %s (%h)' HEAD..upstream/main | head -60)
+
+          git switch -C "$SYNC_BRANCH"
+          if git merge --no-ff --no-edit -m "Merge ${UPSTREAM_REPO} main (${tip})" upstream/main; then
+            git push --force origin "$SYNC_BRANCH"
+            title="Sync upstream VoiceInk: ${behind} new commits (up to ${tip})"
+            body=$(cat <<EOF
+          Merges \`${UPSTREAM_REPO}\` main (\`${tip}\`) into our fork. The merge was clean.
+
+          **After merging**, update the Mac:
+
+          \`\`\`sh
+          cd ~/Developer/voiceink-source && git switch main && git pull --ff-only && scripts/install-local.sh
+          \`\`\`
+
+          Upstream changes:
+          ${commits}
+
+          This branch is rebuilt from main on every run. Resolve anything by hand on a different branch.
+          EOF
+            )
+            existing=$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number --jq '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              gh pr edit "$existing" --title "$title" --body "$body"
+            else
+              gh pr create --base main --head "$SYNC_BRANCH" --title "$title" --body "$body"
+            fi
+          else
+            conflicts=$(git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/')
+            git merge --abort
+            gh label create upstream-sync --color FBCA04 --description "Upstream VoiceInk merge" --force
+            title="Upstream VoiceInk sync needs a manual merge (up to ${tip})"
+            body=$(cat <<EOF
+          Merging \`${UPSTREAM_REPO}\` main (\`${tip}\`, ${behind} new commits) conflicts with our changes in:
+
+          ${conflicts}
+
+          Resolve locally:
+
+          \`\`\`sh
+          cd ~/Developer/voiceink-source
+          git fetch upstream && git switch -c upstream-merge-${tip} main && git merge upstream/main
+          # fix conflicts, commit, push, open a PR to main; after merging: scripts/install-local.sh
+          \`\`\`
+
+          Upstream changes:
+          ${commits}
+          EOF
+            )
+            existing=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body "$body"
+            else
+              gh issue create --label upstream-sync --title "$title" --body "$body"
+            fi
+            echo "::error::Upstream merge conflicts; see the upstream-sync issue."
+            exit 1
+          fi
