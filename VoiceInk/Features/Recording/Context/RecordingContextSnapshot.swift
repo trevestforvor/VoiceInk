@@ -32,12 +32,24 @@ final class RecordingContextSnapshotStore {
     }
 }
 
+/// Screen OCR feeds only AI enhancement, so it is needed only when an enhancement that
+/// could run for this recording has screen context enabled: the current mode, or a mode a
+/// trigger word may switch to after transcription. (Selected text is already fetched only
+/// inside the enhancement step, using the resolved mode.)
+enum RecordingContextNeeds {
+    static func screenCapture(for configurations: [EnhancementRuntimeConfiguration]) -> Bool {
+        configurations.contains { $0.isEnabled && $0.useScreenCaptureContext }
+    }
+}
+
 @MainActor
 enum RecordingContextCaptureService {
     static func startCapture(
         into store: RecordingContextSnapshotStore,
-        language: String?
+        language: String?,
+        captureScreen: Bool
     ) -> [Task<Void, Never>] {
+        guard captureScreen else { return [] }
         let screenCapture = Task { @MainActor in
             guard CGPreflightScreenCaptureAccess(), !Task.isCancelled else { return }
             let screenCaptureService = ScreenCaptureService()
