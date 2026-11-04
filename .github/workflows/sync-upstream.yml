@@ -1,15 +1,27 @@
-# Keeps this fork current with Beingpax/VoiceInk without losing our own commits.
+# Keeps this fork current with Beingpax/VoiceInk releases without losing our own commits.
 #
-# Daily (and on demand), upstream main is merged into the `upstream-sync` branch, rebuilt
-# from our main each run, and offered as a single rolling PR. A merge that conflicts with
-# our changes opens an issue listing the files instead, and the run fails so GitHub emails.
+# Only published upstream releases are offered: never in-progress commits on upstream main,
+# pre-releases or drafts. A release must also be SOAK_DAYS old, so a broken release can be
+# followed by a hotfix before we take it. Daily (and on demand), the newest release that
+# qualifies is merged into the `upstream-sync` branch, rebuilt from our main each run, and
+# offered as one rolling PR carrying the release notes. A merge that conflicts with our
+# changes opens an issue listing the files instead, and the run fails so GitHub emails.
+# Run by hand with a release tag to take that release now, skipping the waiting period.
 # After merging the PR, run scripts/install-local.sh to rebuild and install on the Mac.
+#
+# The repository allows only local actions, so this clones with plain git rather than
+# actions/checkout; the token is attached only to this repository's URL.
 name: Sync upstream
 
 on:
   schedule:
     - cron: "17 9 * * *"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Upstream release tag to take now, skipping the waiting period (e.g. v2.26)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -23,17 +35,17 @@ concurrency:
 env:
   UPSTREAM_REPO: Beingpax/VoiceInk
   SYNC_BRANCH: upstream-sync
+  SOAK_DAYS: "3"
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # The repository allows only local actions, so clone with plain git instead of
-      # actions/checkout. The token is scoped to this repository by the URL rewrite.
-      - name: Merge upstream into the sync branch
+      - name: Merge the newest settled upstream release into the sync branch
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           git config --global url."https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}".insteadOf "https://github.com/${GH_REPO}"
@@ -42,22 +54,59 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch --no-tags upstream main
+          git fetch --quiet --no-tags upstream "+refs/tags/*:refs/tags/*"
 
-          behind=$(git rev-list --count HEAD..upstream/main)
-          if [ "$behind" -eq 0 ]; then
-            echo "main already contains upstream/main."
+          # Published releases, newest first: tag, publish time, age in days, prerelease flag.
+          gh api "repos/${UPSTREAM_REPO}/releases?per_page=50" --jq \
+            '.[] | select(.draft | not) | [.tag_name, .published_at, (((now - (.published_at | fromdateiso8601)) / 86400) | floor), .prerelease] | @tsv' \
+            > "$RUNNER_TEMP/releases.tsv"
+
+          if [ -n "$REQUESTED_TAG" ]; then
+            if ! awk -F'\t' -v t="$REQUESTED_TAG" '$1 == t { found = 1 } END { exit !found }' "$RUNNER_TEMP/releases.tsv"; then
+              echo "::error::${REQUESTED_TAG} is not a published release of ${UPSTREAM_REPO}."
+              exit 1
+            fi
+            target="$REQUESTED_TAG"
+            why="requested by hand, waiting period skipped"
+          else
+            target=$(awk -F'\t' -v soak="$SOAK_DAYS" '$4 == "false" && $3 >= soak { print $1; exit }' "$RUNNER_TEMP/releases.tsv")
+            why="published at least ${SOAK_DAYS} days ago with no newer settled release"
+            if [ -z "$target" ]; then
+              echo "No stable release is ${SOAK_DAYS}+ days old yet."
+              exit 0
+            fi
+          fi
+
+          if git merge-base --is-ancestor "$target" HEAD; then
+            echo "main already contains ${target}."
             exit 0
           fi
-          tip=$(git rev-parse --short upstream/main)
-          commits=$(git log --no-merges --format='- %s (%h)' HEAD..upstream/main | head -60)
+          target_time=$(awk -F'\t' -v t="$target" '$1 == t { print $2 }' "$RUNNER_TEMP/releases.tsv")
+
+          # Every release this merge brings in (not yet in main, not newer than the target),
+          # with its notes; and newer stable releases still in their waiting period.
+          notes=""
+          while IFS=$'\t' read -r tag published _age prerelease; do
+            [[ "$published" > "$target_time" ]] && continue
+            git rev-parse -q --verify "refs/tags/${tag}" >/dev/null || continue
+            git merge-base --is-ancestor "$tag" "$target" || continue
+            git merge-base --is-ancestor "$tag" HEAD && continue
+            label="$tag"
+            [ "$prerelease" = "true" ] && label="$tag (pre-release)"
+            body=$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${tag}" --jq '.body // ""')
+            notes+=$'\n'"### ${label} (${published%%T*})"$'\n\n'"${body:-_No release notes._}"$'\n'
+          done < "$RUNNER_TEMP/releases.tsv"
+          waiting=$(awk -F'\t' -v t="$target_time" -v soak="$SOAK_DAYS" \
+            '$4 == "false" && $2 > t && $3 < soak { printf "- %s (published %s, %d of %d days)\n", $1, substr($2, 1, 10), $3, soak }' \
+            "$RUNNER_TEMP/releases.tsv")
+          count=$(git rev-list --count "HEAD..${target}")
 
           git switch -C "$SYNC_BRANCH"
-          if git merge --no-ff --no-edit -m "Merge ${UPSTREAM_REPO} main (${tip})" upstream/main; then
+          if git merge --no-ff --no-edit -m "Merge ${UPSTREAM_REPO} release ${target}" "$target"; then
             git push --force origin "$SYNC_BRANCH"
-            title="Sync upstream VoiceInk: ${behind} new commits (up to ${tip})"
+            title="Sync upstream VoiceInk release ${target} (${count} commits)"
             body=$(cat <<EOF
-          Merges \`${UPSTREAM_REPO}\` main (\`${tip}\`) into our fork. The merge was clean.
+          Merges upstream release **${target}** (${why}). The merge was clean. Review the notes below and merge only if the changes are wanted.
 
           **After merging**, update the Mac:
 
@@ -65,8 +114,10 @@ jobs:
           cd ~/Developer/voiceink-source && git switch main && git pull --ff-only && scripts/install-local.sh
           \`\`\`
 
-          Upstream changes:
-          ${commits}
+          ## Release notes
+          ${notes}
+          ${waiting:+## Newer releases still in their waiting period
+          ${waiting}}
 
           This branch is rebuilt from main on every run. Resolve anything by hand on a different branch.
           EOF
@@ -81,9 +132,9 @@ jobs:
             conflicts=$(git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/')
             git merge --abort
             gh label create upstream-sync --color FBCA04 --description "Upstream VoiceInk merge" --force
-            title="Upstream VoiceInk sync needs a manual merge (up to ${tip})"
+            title="Upstream VoiceInk ${target} needs a manual merge"
             body=$(cat <<EOF
-          Merging \`${UPSTREAM_REPO}\` main (\`${tip}\`, ${behind} new commits) conflicts with our changes in:
+          Merging upstream release **${target}** (${count} commits) conflicts with our changes in:
 
           ${conflicts}
 
@@ -91,12 +142,12 @@ jobs:
 
           \`\`\`sh
           cd ~/Developer/voiceink-source
-          git fetch upstream && git switch -c upstream-merge-${tip} main && git merge upstream/main
+          git fetch upstream --tags && git switch -c upstream-merge-${target} main && git merge ${target}
           # fix conflicts, commit, push, open a PR to main; after merging: scripts/install-local.sh
           \`\`\`
 
-          Upstream changes:
-          ${commits}
+          ## Release notes
+          ${notes}
           EOF
             )
             existing=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number // empty')
