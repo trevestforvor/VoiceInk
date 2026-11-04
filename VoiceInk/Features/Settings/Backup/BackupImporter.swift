@@ -192,6 +192,9 @@ enum BackupImporter {
         if let clipboardDelay = general.clipboardRestoreDelay {
             UserDefaults.standard.set(clipboardDelay, forKey: "clipboardRestoreDelay")
         }
+        if let method = general.pasteMethod.flatMap(PasteMethod.init(rawValue:)) {
+            PasteMethod.setCurrent(method)
+        }
         if let enabled = general.smartPunctuationEnabled {
             UserDefaults.standard.set(enabled, forKey: SmartPunctuation.settingsKey)
         }
@@ -205,7 +208,11 @@ enum BackupImporter {
             UserDefaults.standard.set(AutoLearnSettings.clampedMinimumCorrections(minimumCorrections),
                 forKey: AutoLearnSettings.minimumCorrectionsKey)
         }
-        if general.isAutoLearnDictionaryEnabled != nil || general.autoLearnMinimumCorrections != nil {
+        let reviewMode = general.autoLearnAIReviewMode.flatMap(AutoLearnSettings.AIReviewMode.init(rawValue:))
+        if let reviewMode {
+            UserDefaults.standard.set(reviewMode.rawValue, forKey: AutoLearnSettings.aiReviewModeKey)
+        }
+        if general.isAutoLearnDictionaryEnabled != nil || general.autoLearnMinimumCorrections != nil || reviewMode != nil {
             Task {
                 if let autoLearnEnabled = general.isAutoLearnDictionaryEnabled {
                     await AutoLearnService.shared.settingDidChange(isEnabled: autoLearnEnabled)

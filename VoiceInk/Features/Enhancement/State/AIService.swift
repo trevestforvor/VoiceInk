@@ -2,7 +2,7 @@ import Combine
 import Foundation
 import LLMkit
 
-enum AIProvider: String, CaseIterable {
+enum AIProvider: String, CaseIterable, Sendable {
     case cerebras = "Cerebras"
     case groq = "Groq"
     case gemini = "Gemini"
@@ -76,7 +76,7 @@ enum AIProvider: String, CaseIterable {
         case .deepgram:
             return "whisper-1"
         case .soniox:
-            return "stt-async-v5"
+            return "stt-async-v6"
         case .speechmatics:
             return "speechmatics-enhanced"
         case .assemblyAI:
@@ -150,7 +150,7 @@ enum AIProvider: String, CaseIterable {
         case .deepgram:
             return ["whisper-1"]
         case .soniox:
-            return ["stt-async-v5"]
+            return ["stt-async-v6"]
         case .speechmatics:
             return ["speechmatics-enhanced"]
         case .assemblyAI:
@@ -712,10 +712,20 @@ class AIService: ObservableObject {
         }
     }
 
-    func enhanceWithOllama(text: String, systemPrompt: String, model: String? = nil, timeout: TimeInterval = 30)
-        async throws -> String
-    {
-        try await ollamaService.enhance(text, withSystemPrompt: systemPrompt, model: model, timeout: timeout)
+    func enhanceWithOllama(
+        text: String,
+        systemPrompt: String,
+        model: String? = nil,
+        timeout: TimeInterval = 30,
+        retryOnTimeout: Bool = false
+    ) async throws -> String {
+        try await ollamaService.enhance(
+            text,
+            withSystemPrompt: systemPrompt,
+            model: model,
+            timeout: timeout,
+            retryOnTimeout: retryOnTimeout
+        )
     }
 
     func enhanceWithVoiceInkRefine(transcript: String, vocabulary: RecordingVocabulary) async throws -> String {
