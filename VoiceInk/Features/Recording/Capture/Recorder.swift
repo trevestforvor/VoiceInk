@@ -24,6 +24,32 @@ class Recorder: NSObject, ObservableObject {
     private let smoothedValuesLock = NSLock()
     private var smoothedAverage: Float = 0
     private var smoothedPeak: Float = 0
+    /// Hardware started by `prestartHardware`, awaiting adoption by `startRecording`.
+    private var prestart: Prestart?
+
+    private struct Prestart {
+        let url: URL
+        let deviceID: AudioDeviceID
+        let outcome: PrestartOutcome
+    }
+
+    /// Written on `audioSetupQueue`; read only after a barrier on that serial queue.
+    private final class PrestartOutcome: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedError: Error?
+        var error: Error? {
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return storedError
+            }
+            set {
+                lock.lock()
+                storedError = newValue
+                lock.unlock()
+            }
+        }
+    }
 
     /// Audio chunk callback for streaming. Can be updated while recording;
     /// changes are forwarded to the live CoreAudioRecorder.
@@ -50,13 +76,97 @@ class Recorder: NSObject, ObservableObject {
         schedulePrepareForCurrentDevice(reason: "init")
     }
 
-    func startRecording(toOutputFile url: URL) async throws {
-        let resolution = deviceManager.resolveCurrentRecordingDevice()
-        guard var deviceID = resolution.deviceID else {
+    /// Starts capture hardware without waiting, dispatching straight to the setup queue so
+    /// it does not wait behind main-actor work such as building the recorder panel.
+    /// `startRecording(toOutputFile:)` with the same URL adopts it; otherwise call
+    /// `discardPrestartedHardware(at:)`. Returns false if no microphone is usable.
+    @discardableResult
+    func prestartHardware(toOutputFile url: URL) -> Bool {
+        guard prestart == nil, let deviceID = deviceManager.resolveCurrentRecordingDevice().deviceID else {
+            return false
+        }
+        deviceManager.beginRecordingSetup(deviceID: deviceID)
+
+        let coreAudioRecorder = recorder ?? CoreAudioRecorder()
+        coreAudioRecorder.onAudioChunk = onAudioChunk
+        recorder = coreAudioRecorder
+
+        let selectedChannels = deviceManager.selectedInputChannels(for: deviceID)
+        let outcome = PrestartOutcome()
+        let requestedAt = DispatchTime.now().uptimeNanoseconds
+        audioSetupQueue.async { [logger] in
+            do {
+                try coreAudioRecorder.startRecording(
+                    toOutputFile: url, deviceID: deviceID, selectedInputChannels: selectedChannels
+                )
+                let elapsedMs = (DispatchTime.now().uptimeNanoseconds - requestedAt) / 1_000_000
+                logger.notice("Prestarted recording hardware running elapsedMs=\(elapsedMs, privacy: .public)")
+            } catch {
+                outcome.error = error
+            }
+        }
+        prestart = Prestart(url: url, deviceID: deviceID, outcome: outcome)
+        return true
+    }
+
+    /// Stops hardware started by `prestartHardware` that no recording adopted, and removes
+    /// its file. A no-op once adopted or already discarded.
+    func discardPrestartedHardware(at url: URL, clearAudioChunk: Bool = true) async {
+        guard let pending = prestart, pending.url == url else { return }
+        prestart = nil
+        let currentRecorder = recorder
+        await withCheckedContinuation { continuation in
+            audioSetupQueue.async {
+                currentRecorder?.stopRecording()
+                continuation.resume()
+            }
+        }
+        if clearAudioChunk {
             onAudioChunk = nil
-            throw RecorderError.noUsableMicrophone(
-                internalMicrophoneBlockedByClosedLid: resolution.internalMicrophoneBlockedByClosedLid
+        }
+        try? FileManager.default.removeItem(at: url)
+        // Prestarts happen only while idle, so no other recording owns the device session.
+        deviceManager.recordingDidStop()
+    }
+
+    /// Waits for a pending prestart for `url` and reports whether its hardware is running.
+    private func adoptPrestartedHardware(for url: URL) async -> AudioDeviceID? {
+        guard let pending = prestart else { return nil }
+        prestart = nil
+        guard pending.url == url else {
+            // Not ours: release it so this recording starts cleanly, keeping the audio
+            // callback the caller installed for this recording.
+            prestart = pending
+            await discardPrestartedHardware(at: pending.url, clearAudioChunk: false)
+            return nil
+        }
+        // The serial setup queue runs the prestart before this barrier.
+        await withCheckedContinuation { continuation in
+            audioSetupQueue.async { continuation.resume() }
+        }
+        if let error = pending.outcome.error {
+            logger.warning(
+                "Prestarted recording failed; starting normally error=\(error, privacy: .public)"
             )
+            return nil
+        }
+        return pending.deviceID
+    }
+
+    func startRecording(toOutputFile url: URL) async throws {
+        let prestartedDeviceID = await adoptPrestartedHardware(for: url)
+        var deviceID: AudioDeviceID
+        if let prestartedDeviceID {
+            deviceID = prestartedDeviceID
+        } else {
+            let resolution = deviceManager.resolveCurrentRecordingDevice()
+            guard let resolvedDeviceID = resolution.deviceID else {
+                onAudioChunk = nil
+                throw RecorderError.noUsableMicrophone(
+                    internalMicrophoneBlockedByClosedLid: resolution.internalMicrophoneBlockedByClosedLid
+                )
+            }
+            deviceID = resolvedDeviceID
         }
 
         deviceManager.beginRecordingSetup(deviceID: deviceID)
@@ -75,7 +185,9 @@ class Recorder: NSObject, ObservableObject {
 
         do {
             do {
-                try await startHardwareRecording(coreAudioRecorder, to: url, deviceID: deviceID)
+                if prestartedDeviceID == nil {
+                    try await startHardwareRecording(coreAudioRecorder, to: url, deviceID: deviceID)
+                }
             } catch {
                 let retryResolution = deviceManager.resolveCurrentRecordingDevice(excluding: deviceID)
                 guard deviceManager.isClamshellClosed,
@@ -106,6 +218,8 @@ class Recorder: NSObject, ObservableObject {
     }
 
     func stopRecording() async {
+        // Stopping the current recorder below also stops unadopted prestarted hardware.
+        prestart = nil
         recordingDeviceNotificationTask?.cancel()
         recordingDeviceNotificationTask = nil
         let playbackSessionID = self.playbackSessionID

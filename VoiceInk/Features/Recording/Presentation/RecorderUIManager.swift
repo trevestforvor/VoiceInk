@@ -249,6 +249,9 @@ class RecorderUIManager: ObservableObject, RecorderPanelPresenting {
             }
         } else {
             SoundManager.shared.playStartSound()
+            // Start the microphone before showing the panel: building the panel holds the
+            // main actor long enough to clip the first word if capture waits behind it.
+            engine.prestartRecordingHardware()
             isRecorderPanelVisible = true
             await engine.toggleRecord(modeId: modeId)
         }

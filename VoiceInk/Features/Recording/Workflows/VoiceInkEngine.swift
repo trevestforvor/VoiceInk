@@ -110,6 +110,9 @@ class VoiceInkEngine: NSObject, ObservableObject {
     private var activeRecordingContextStore: RecordingContextSnapshotStore?
     private var activeRecordingContextTasks: [Task<Void, Never>] = []
     private var voiceInkRefinePreparationTask: Task<Void, Never>?
+    /// Microphone hardware started on key-down, before the recorder panel is built.
+    /// The next recording start adopts it; see `prestartRecordingHardware()`.
+    private var prestartedRecording: (url: URL, audioGate: RealtimeAudioChunkGate)?
 
     let recorder = Recorder()
     var recordedFile: URL? = nil
@@ -256,7 +259,10 @@ class VoiceInkEngine: NSObject, ObservableObject {
             }
 
             let startID = UUID()
-            let permanentURL = recordingsDirectory.appendingPathComponent("\(UUID().uuidString).wav")
+            let prestarted = prestartedRecording
+            prestartedRecording = nil
+            let permanentURL = prestarted?.url
+                ?? recordingsDirectory.appendingPathComponent("\(UUID().uuidString).wav")
             recordedFile = permanentURL
             activeRecordingStartID = startID
             recordingState = .starting
@@ -264,11 +270,15 @@ class VoiceInkEngine: NSObject, ObservableObject {
             requestRecordPermission { [self] granted in
                 if granted {
                     Task { @MainActor [self] in
-                        guard self.activeRecordingStartID == startID, !self.shouldCancelRecording else { return }
+                        guard self.activeRecordingStartID == startID, !self.shouldCancelRecording else {
+                            await self.recorder.discardPrestartedHardware(at: permanentURL)
+                            return
+                        }
                         guard await self.passesRecordingPreflight(),
                             self.activeRecordingStartID == startID,
                             !self.shouldCancelRecording
                         else {
+                            await self.recorder.discardPrestartedHardware(at: permanentURL)
                             return
                         }
                         guard self.recorderUIManager?.isRecorderPanelVisible ?? false else {
@@ -282,7 +292,9 @@ class VoiceInkEngine: NSObject, ObservableObject {
                         }
 
                         do {
-                            let realtimeAudioGate = RealtimeAudioChunkGate()
+                            // A prestarted recording already routes audio into its gate,
+                            // which buffers chunks until the streaming session connects.
+                            let realtimeAudioGate = prestarted?.audioGate ?? RealtimeAudioChunkGate()
                             self.recorder.onAudioChunk = realtimeAudioGate.receive
 
                             try await self.recorder.startRecording(toOutputFile: permanentURL)
@@ -468,10 +480,35 @@ class VoiceInkEngine: NSObject, ObservableObject {
                         recordedFile = nil
                         recordingState = .idle
                     }
+                    Task { await recorder.discardPrestartedHardware(at: permanentURL) }
                     logger.error("Recording permission denied")
                 }
             }
         }
+    }
+
+    /// Starts the microphone on key-down so capture runs in parallel with building the
+    /// recorder panel, instead of after it (~170 ms, enough to clip a first word).
+    /// Call immediately before the `toggleRecord` that starts a new recording; it adopts
+    /// the file and audio gate. Does nothing unless idle. Microphone permission is not
+    /// pre-checked: AVCaptureDevice caches a stale status after access is granted through
+    /// Core Audio, and a start without access fails and falls back to the normal path.
+    func prestartRecordingHardware() {
+        guard recordingState == .idle, prestartedRecording == nil else {
+            logger.notice(
+                "Recording prestart skipped state=\(String(describing: self.recordingState), privacy: .public) pending=\(self.prestartedRecording != nil, privacy: .public)"
+            )
+            return
+        }
+        let url = recordingsDirectory.appendingPathComponent("\(UUID().uuidString).wav")
+        let audioGate = RealtimeAudioChunkGate()
+        recorder.onAudioChunk = audioGate.receive
+        guard recorder.prestartHardware(toOutputFile: url) else {
+            logger.notice("Recording prestart skipped: recorder declined")
+            recorder.onAudioChunk = nil
+            return
+        }
+        prestartedRecording = (url, audioGate)
     }
 
     private func requestRecordPermission(response: @escaping (Bool) -> Void) {
@@ -565,8 +602,35 @@ class VoiceInkEngine: NSObject, ObservableObject {
         activeRecordingContextStore = store
         activeRecordingContextTasks = RecordingContextCaptureService.startCapture(
             into: store,
-            language: language
+            language: language,
+            needs: recordingContextNeeds()
         )
+    }
+
+    /// Screen and selected-text capture feed only AI enhancement, so skip them unless an
+    /// enhancement that could run for this recording uses them: the current mode, or a
+    /// trigger-word mode the pipeline may switch to after transcription.
+    private func recordingContextNeeds() -> RecordingContextNeeds {
+        guard let enhancementService, let aiService = enhancementService.getAIService() else {
+            return .none
+        }
+        let triggerModes = ModeManager.shared.enabledConfigurations.filter {
+            !$0.triggerWords.isEmpty || !($0.triggerGroups ?? []).isEmpty
+        }
+        let candidateModes: [ModeConfig?] = [nil] + triggerModes.map { Optional($0) }
+        let configurations = candidateModes.map { mode in
+            ModeRuntimeResolver.currentEnhancementConfiguration(
+                mode: mode,
+                enhancementService: enhancementService,
+                aiService: aiService
+            )
+        }
+        .filter { enhancementService.isConfigured(for: $0) }
+        let needs = RecordingContextNeeds.required(by: configurations)
+        if needs == .none {
+            logger.notice("Skipping recording context capture: AI enhancement is off or unconfigured")
+        }
+        return needs
     }
 
     private func clearActiveRecordingContext() {
