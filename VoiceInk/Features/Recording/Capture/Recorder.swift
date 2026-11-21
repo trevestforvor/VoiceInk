@@ -183,6 +183,8 @@ class Recorder: NSObject, ObservableObject {
         coreAudioRecorder.onAudioChunk = onAudioChunk
         recorder = coreAudioRecorder
 
+        ScreenSleepPreventer.shared.startPreventingSleep()
+
         do {
             do {
                 if prestartedDeviceID == nil {
@@ -248,6 +250,7 @@ class Recorder: NSObject, ObservableObject {
                 await playbackController.resumeMedia(sessionID: playbackSessionID)
             }
         }
+        ScreenSleepPreventer.shared.stopPreventingSleep()
         deviceManager.recordingDidStop()
     }
 
